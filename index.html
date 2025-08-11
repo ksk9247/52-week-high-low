@@ -1,0 +1,298 @@
+Got it — here’s a clean, **standalone** HTML that:
+
+- accepts a **pubhtml** or **CSV** “Publish to web” link,
+- preserves **gid**,
+- retries through a **CORS fallback** if needed,
+- lets you pick a ticker and shows 52-week position + stats.
+
+Save as `sheets_position_calculator.html` and open via a local server (e.g., `python -m http.server 8080`) for best results.
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>52-Week Position Calculator — Sheets Connected</title>
+<style>
+  :root{--bg:#0f172a;--panel:#0b1220;--text:#e5e7eb;--muted:#94a3b8;--accent:#22d3ee;--ok:#86efac;--warn:#fca5a5;--border:rgba(255,255,255,.12)}
+  *{box-sizing:border-box} body{margin:0;padding:24px;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial;background:#0f172a;color:var(--text)}
+  .container{max-width:920px;margin:0 auto}
+  .card{background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.02));border:1px solid var(--border);border-radius:20px;padding:22px}
+  h1{margin:0 0 6px;font-size:1.5rem} .sub{margin:0 0 14px;color:var(--muted)}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  input[type=url],select{flex:1 1 520px;padding:12px 14px;border-radius:12px;border:1px solid var(--border);background:var(--panel);color:var(--text);font-size:1rem;outline:none}
+  input:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(34,211,238,.15)}
+  button{cursor:pointer;border:0;padding:12px 16px;border-radius:12px;font-weight:700;background:var(--accent);color:#05333a}
+  button.secondary{background:transparent;color:var(--muted);border:1px solid var(--border)}
+  .mini{font-size:.85rem;color:var(--muted)}
+  .result{margin-top:16px;padding:16px;border-radius:14px;border:1px dashed var(--border)}
+  .big{font-size:2.2rem;font-weight:800}
+  .pill{padding:4px 10px;border-radius:999px;font-size:.8rem}
+  .ok{background:var(--ok);color:#05301a} .warn{background:var(--warn);color:#3a0b0b}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+  .kv{display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:10px}
+  .bar{height:12px;border-radius:999px;background:rgba(255,255,255,.08);position:relative;overflow:hidden;margin-top:10px}
+  .bar>.fill{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,#60a5fa,#22d3ee,#34d399);width:0%;transition:width .4s ease}
+  .bar>.thumb{position:absolute;top:-4px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 4px 12px rgba(0,0,0,.5);transform:translateX(-50%);left:0%;transition:left .4s ease}
+  details{margin-top:14px} summary{cursor:pointer;color:var(--accent)} code{background:rgba(255,255,255,.08);padding:2px 6px;border-radius:6px}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="card">
+    <h1>52-Week Position Calculator — Google Sheets Connected</h1>
+    <p class="sub">Paste your Google Sheets <b>Publish to web</b> link (pubhtml or CSV). We’ll convert it and handle CORS for you.</p>
+
+    <div class="row">
+      <input id="csvUrl" type="url" placeholder="Paste Published link (pubhtml or CSV) and click Fetch" />
+      <button id="load">Fetch Sheet</button>
+      <button id="clear" class="secondary">Clear</button>
+    </div>
+    <div id="converted" class="mini" style="margin-top:6px"></div>
+
+    <div class="row" style="margin-top:10px">
+      <select id="ticker" disabled>
+        <option value="">Select ticker…</option>
+      </select>
+      <button id="recalc" class="secondary" disabled>Recalculate</button>
+    </div>
+
+    <div id="output" class="result" hidden>
+      <div class="row" style="justify-content:space-between;align-items:center">
+        <span class="mini">Position between 52W Low ↔ 52W High</span>
+        <span id="badge" class="pill"></span>
+      </div>
+      <div id="percent" class="big">—</div>
+      <div class="bar"><div class="fill"></div><div class="thumb"></div></div>
+      <div class="grid">
+        <div class="kv"><span class="mini">Ticker</span><strong id="oTicker">—</strong></div>
+        <div class="kv"><span class="mini">Current</span><strong id="oCurrent">—</strong></div>
+        <div class="kv"><span class="mini">52W Low</span><strong id="oLow">—</strong></div>
+        <div class="kv"><span class="mini">52W High</span><strong id="oHigh">—</strong></div>
+        <div class="kv"><span class="mini">From Low</span><strong id="oFromLow">—</strong></div>
+        <div class="kv"><span class="mini">From High</span><strong id="oFromHigh">—</strong></div>
+      </div>
+      <div id="note" class="mini" style="margin-top:8px"></div>
+    </div>
+
+    <details>
+      <summary>Required columns in your CSV</summary>
+      <p>Header row should include at least these (case-insensitive; synonyms allowed):</p>
+      <ul>
+        <li><code>Ticker</code> or <code>Symbol</code></li>
+        <li><code>52W Low</code> (or <code>52-week Low</code>)</li>
+        <li><code>52W High</code> (or <code>52-week High</code>)</li>
+        <li><code>Current</code> (or <code>Price</code>, <code>Last</code>)</li>
+      </ul>
+    </details>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const nf = new Intl.NumberFormat(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+let table = [];
+
+/* Turn pubhtml/edit/view links into a CSV publish link, keeping gid when present */
+function csvUrlFromAny(input){
+  if(!input) return "";
+  const raw = input.trim();
+
+  // If it's already a CSV publish link, return as is
+  if(/\/pub\?/.test(raw) && /output=csv/.test(raw)) return raw;
+
+  try{
+    const u = new URL(raw);
+    // gid from query or hash
+    let gid = u.searchParams.get("gid") || "";
+    if(!gid && u.hash && u.hash.includes("gid=")){
+      const m = u.hash.match(/gid=(\d+)/);
+      gid = m ? m[1] : "";
+    }
+
+    // pubhtml → pub?output=csv
+    if(u.pathname.endsWith("/pubhtml")){
+      u.pathname = u.pathname.replace("/pubhtml","/pub");
+      u.search = ""; // reset
+      u.searchParams.set("output","csv");
+      if(gid) u.searchParams.set("gid", gid);
+      return u.toString();
+    }
+
+    // edit/view link → we can't fetch unless it's published; return as is for helpful error
+    return raw;
+  }catch(e){
+    // Fallback simple replace
+    return raw.replace(/\/pubhtml.*/,"/pub?output=csv");
+  }
+}
+
+/* Robust CSV parser (handles quotes/commas/newlines) */
+function parseCSV(text){
+  const rows = [];
+  let i=0, field="", row=[], inQuotes=false;
+
+  while(i < text.length){
+    const c = text[i];
+
+    if(inQuotes){
+      if(c === '"'){
+        if(text[i+1] === '"'){ field += '"'; i+=2; continue; }
+        inQuotes = false; i++; continue;
+      }
+      field += c; i++; continue;
+    }else{
+      if(c === '"'){ inQuotes = true; i++; continue; }
+      if(c === ','){ row.push(field); field=""; i++; continue; }
+      if(c === '\r'){ i++; continue; }
+      if(c === '\n'){ row.push(field); rows.push(row); field=""; row=[]; i++; continue; }
+      field += c; i++; continue;
+    }
+  }
+  // last field
+  row.push(field); rows.push(row);
+
+  if(!rows.length) return [];
+  // remove fully empty rows
+  return rows.filter(r => r.some(cell => String(cell).trim() !== ""));
+}
+
+/* Map headers and build records */
+function toRecords(rows){
+  if(!rows.length) return [];
+  const headers = rows[0].map(h => String(h||"").trim().toLowerCase());
+  const idx = {
+    ticker: findHeader(headers, ["ticker","symbol"]),
+    low:    findHeader(headers, ["52w low","52-week low","52 week low","low 52w"]),
+    high:   findHeader(headers, ["52w high","52-week high","52 week high","high 52w"]),
+    current:findHeader(headers, ["current","price","last"])
+  };
+  const missing = Object.entries(idx).filter(([k,v]) => v === -1).map(([k])=>k);
+  if(missing.length) throw new Error("Missing columns: "+missing.join(", "));
+
+  const out = [];
+  for(let r=1;r<rows.length;r++){
+    const row = rows[r];
+    const rec = {
+      ticker: (row[idx.ticker]||"").trim(),
+      low: toNum(row[idx.low]),
+      high: toNum(row[idx.high]),
+      current: toNum(row[idx.current])
+    };
+    if(rec.ticker) out.push(rec);
+  }
+  return out;
+}
+function findHeader(headers, aliases){
+  for(const a of aliases){
+    const target = a.replace(/[-\s_]/g,"");
+    const i = headers.findIndex(h => h === a || h.replace(/[-\s_]/g,"") === target);
+    if(i !== -1) return i;
+  }
+  return -1;
+}
+function toNum(v){
+  if(v==null) return NaN;
+  const s = String(v).replace(/[%₹₹,$\s]/g,"");
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? n : NaN;
+}
+function fmt(n){ return Number.isFinite(n) ? nf.format(n) : "—"; }
+
+function calcAndRender(rec){
+  const output = $("output");
+  const badge = $("badge");
+  const percentEl = $("percent");
+  const note = $("note");
+  const fill = document.querySelector(".bar .fill");
+  const thumb = document.querySelector(".bar .thumb");
+
+  if(!rec){ output.hidden=true; return; }
+  const {ticker, low, high, current} = rec;
+
+  if(!Number.isFinite(low)||!Number.isFinite(high)||!Number.isFinite(current)||!(high>low)){
+    output.hidden = false;
+    percentEl.textContent = "Missing or invalid numbers.";
+    badge.textContent = ""; badge.className = "pill";
+    ["oTicker","oCurrent","oLow","oHigh","oFromLow","oFromHigh"].forEach(id=>$(id).textContent="—");
+    fill.style.width="0%"; thumb.style.left="0%";
+    note.textContent = "Check that 52W Low/High/Current are numeric in the CSV.";
+    return;
+  }
+
+  const range = high - low;
+  const pos = ((current - low) / range) * 100;
+  const pct = Math.max(0, Math.min(100, pos));
+  const fromLow = current - low;
+  const fromHigh = high - current;
+
+  $("oTicker").textContent = ticker;
+  $("oCurrent").textContent = fmt(current);
+  $("oLow").textContent = fmt(low);
+  $("oHigh").textContent = fmt(high);
+  $("oFromLow").textContent = fmt(fromLow);
+  $("oFromHigh").textContent = fmt(fromHigh);
+
+  output.hidden = false;
+  $("percent").textContent = nf.format(pos) + "%";
+  fill.style.width = pct + "%";
+  thumb.style.left = pct + "%";
+
+  badge.className = "pill";
+  if(current < low){ badge.textContent = "Below 52-week low"; badge.classList.add("warn"); }
+  else if(current > high){ badge.textContent = "Above 52-week high"; badge.classList.add("ok"); }
+  else { badge.textContent = "Within 52-week range"; badge.classList.add("ok"); }
+  note.textContent = "";
+}
+
+async function fetchSheet(){
+  const raw = $("csvUrl").value.trim();
+  if(!raw){ alert("Paste a Published link from Google Sheets (pubhtml or CSV)."); return; }
+  const converted = csvUrlFromAny(raw);
+  $("converted").textContent = (converted !== raw)
+    ? `Converted to CSV: ${converted}`
+    : (converted.includes("output=csv") ? "CSV link detected." : "Note: If this is an edit/view link, please Publish to web as CSV first.");
+
+  let text = "";
+  try{
+    const res = await fetch(converted, {mode:"cors"});
+    if(!res.ok) throw new Error("HTTP "+res.status);
+    text = await res.text();
+  }catch(e){
+    // CORS fallback
+    const proxied = "https://api.allorigins.win/raw?url=" + encodeURIComponent(converted);
+    const res2 = await fetch(proxied);
+    if(!res2.ok) throw new Error("HTTP "+res2.status+" (via CORS helper)");
+    text = await res2.text();
+  }
+
+  const rows = parseCSV(text);
+  table = toRecords(rows);
+  if(!table.length) throw new Error("No rows parsed.");
+  const sel = $("ticker");
+  sel.innerHTML = '<option value="">Select ticker…</option>' +
+    table.map((r,i)=>`<option value="${i}">${r.ticker}</option>`).join("");
+  sel.disabled = false; $("recalc").disabled = false; $("output").hidden = true;
+}
+
+$("load").addEventListener("click", fetchSheet);
+$("clear").addEventListener("click", ()=>{
+  $("csvUrl").value=""; $("converted").textContent="";
+  $("ticker").innerHTML='<option value="">Select ticker…</option>'; $("ticker").disabled=true;
+  $("recalc").disabled=true; $("output").hidden=true; table=[];
+});
+$("ticker").addEventListener("change",(e)=>{
+  const idx = parseInt(e.target.value,10);
+  if(Number.isInteger(idx)) calcAndRender(table[idx]);
+});
+$("recalc").addEventListener("click", ()=>{
+  const sel = $("ticker"); const idx = parseInt(sel.value,10);
+  if(Number.isInteger(idx)) calcAndRender(table[idx]);
+});
+</script>
+</body>
+</html>
+```
+
+If it still doesn’t fetch locally, run it via a tiny server (e.g., `python -m http.server 8080`) and make sure your sheet is **File → Share → Publish to web → select the correct tab → CSV**.
